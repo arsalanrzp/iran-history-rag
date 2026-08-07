@@ -108,7 +108,7 @@ def main():
         if not query:
             continue
 
-        chunks, sources, scores = retrieve(query, top_k=4)
+        chunks, sources, scores = retrieve(query)
 
         # Show what was retrieved (great for debugging)
         print("\n📚 Retrieved chunks: (using cross-encoder reranker)")
