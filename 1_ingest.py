@@ -2,6 +2,9 @@
 import wikipediaapi
 import chromadb
 from sentence_transformers import SentenceTransformer
+from rank_bm25 import BM25Okapi
+import pickle
+
 
 # ── 1. Articles to fetch ──────────────────────────────────────────────────────
 ARTICLES = [
@@ -71,7 +74,20 @@ def get_collection():
     return collection
 
 
-# ── 5. Embed + Store ──────────────────────────────────────────────────────────
+# ── 5. Tokenization for BM25 ─────────────────────────────────────────────────
+
+
+def tokenize(text):
+    return text.lower().split()
+
+
+def build_bm25_index(chunks):
+    tokenized_chunks = [tokenize(chunk) for chunk in chunks]
+    bm25 = BM25Okapi(tokenized_chunks)
+    return bm25
+
+
+# ── 6. Embed + Store ──────────────────────────────────────────────────────────
 def ingest(corpus, collection, model):
     all_chunks, all_ids, all_metadata = [], [], []
 
@@ -103,6 +119,24 @@ def ingest(corpus, collection, model):
         metadatas=all_metadata,
     )
     print(f"\n✅ Stored {len(all_chunks)} chunks in ChromaDB.")
+
+    # Build BM25 index for keyword search
+    print("\nBuilding BM25 index...")
+    bm25 = build_bm25_index(all_chunks)
+
+    # Persist it — BM25Okapi doesn't save to ChromaDB, so pickle it separately
+    with open("./chroma_db/bm25_index.pkl", "wb") as f:
+        pickle.dump(
+            {
+                "bm25": bm25,
+                "chunks": all_chunks,
+                "ids": all_ids,
+                "sources": [m["source"] for m in all_metadata],
+            },
+            f,
+        )
+
+    print("✅ BM25 index saved.")
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────

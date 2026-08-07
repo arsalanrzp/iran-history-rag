@@ -5,14 +5,29 @@ from sentence_transformers import SentenceTransformer
 from google import genai
 from dotenv import load_dotenv
 from sentence_transformers import CrossEncoder
+import pickle
 
 
 load_dotenv()
 
-# ── 1. Load the persisted DB (instant — no re-embedding) ─────────────────────
+# ── 1. Load the persisted DB (instant — no re-embedding) ───────────────────── and BM25 indexes
 client = chromadb.PersistentClient(path="./chroma_db")
 collection = client.get_collection("iran_history")
 model = SentenceTransformer("all-MiniLM-L6-v2")
+
+
+with open("./chroma_db/bm25_index.pkl", "rb") as f:
+    bm25_data = pickle.load(f)
+
+bm25 = bm25_data["bm25"]
+bm25_chunks = bm25_data["chunks"]
+bm25_ids = bm25_data["ids"]
+bm25_sources = bm25_data["sources"]
+
+
+def tokenize(text):
+    return text.lower().split()
+
 
 # Load once, alongside your bi-encoder model
 reranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
@@ -26,43 +41,60 @@ print(f"✅ Loaded collection with {collection.count()} chunks\n")
 
 
 # ── 2. Retrieval function ─────────────────────────────────────────────────────
-def retrieve(query, top_k=15, rerank_top_n=4):
-    """
-    Stage 1: bi-encoder retrieves a wider candidate pool (top_k).
-    Stage 2: cross-encoder reranks and returns the best rerank_top_n.
-    """
+def retrieve(query, dense_top_k=20, bm25_top_k=20, rerank_top_n=4, k=60):
+    # ── Dense retrieval (unchanged) ──
     query_embedding = model.encode([query], normalize_embeddings=True).tolist()
-
-    results = collection.query(
+    dense_results = collection.query(
         query_embeddings=query_embedding,
-        n_results=top_k,
-        include=["documents", "metadatas", "distances"],
+        n_results=dense_top_k,
+        include=["documents", "metadatas"],
     )
+    dense_ids = dense_results["ids"][0]
+    dense_chunks = dense_results["documents"][0]
+    dense_sources = [m["source"] for m in dense_results["metadatas"][0]]
 
-    chunks = results["documents"][0]
-    sources = [m["source"] for m in results["metadatas"][0]]
-    scores = results["distances"][0]  # cosine distance (lower = more similar)
+    # ── BM25 retrieval ──
+    tokenized_query = tokenize(query)
+    bm25_scores = bm25.get_scores(tokenized_query)
+    top_bm25_idx = sorted(
+        range(len(bm25_scores)), key=lambda i: bm25_scores[i], reverse=True
+    )[:bm25_top_k]
+    bm25_result_ids = [bm25_ids[i] for i in top_bm25_idx]
 
-    print("\n📚 Retrieved chunks: (bi_encoder)")
-    for i, (src, score) in enumerate(zip(sources, scores)):
-        print(f"  [{i + 1}] {src} (distance: {score:.3f})")
+    # ── Lookup table: chunk id → (text, source), from either side ──
+    lookup = {
+        cid: (chunk, src)
+        for cid, chunk, src in zip(dense_ids, dense_chunks, dense_sources)
+    }
+    for i in top_bm25_idx:
+        cid = bm25_ids[i]
+        lookup.setdefault(cid, (bm25_chunks[i], bm25_sources[i]))
 
-    # ── Cross-encoder reranking ──────────────────────────────────
-    pairs = [[query, chunk] for chunk in chunks]
-    rerank_scores = reranker.predict(pairs)  # higher = more relevant
+    # ── Reciprocal Rank Fusion ──
+    rrf_scores = {}
+    for rank, cid in enumerate(dense_ids, start=1):
+        rrf_scores[cid] = rrf_scores.get(cid, 0) + 1 / (k + rank)
+    for rank, cid in enumerate(bm25_result_ids, start=1):
+        rrf_scores[cid] = rrf_scores.get(cid, 0) + 1 / (k + rank)
 
-    # Sort candidates by rerank score, descending
+    merged_ids = sorted(rrf_scores, key=lambda cid: rrf_scores[cid], reverse=True)
+    merged_chunks = [lookup[cid][0] for cid in merged_ids]
+    merged_sources = [lookup[cid][1] for cid in merged_ids]
+
+    print("\n📚 Hybrid retrieval (RRF merged, top 10):")
+    for i, cid in enumerate(merged_ids[:10]):
+        print(f"  [{i + 1}] {cid} (rrf: {rrf_scores[cid]:.4f})")
+
+    # ── Cross-encoder reranking — unchanged, just fed a richer pool ──
+    pairs = [[query, chunk] for chunk in merged_chunks]
+    rerank_scores = reranker.predict(pairs)
     ranked = sorted(
-        zip(chunks, sources, rerank_scores),
+        zip(merged_chunks, merged_sources, rerank_scores),
         key=lambda x: x[2],
         reverse=True,
     )[:rerank_top_n]
 
-    reranked_chunks = [r[0] for r in ranked]
-    reranked_sources = [r[1] for r in ranked]
-    reranked_scores = [r[2] for r in ranked]
-
-    return reranked_chunks, reranked_sources, reranked_scores
+    return [r[0] for r in ranked], [r[1] for r in ranked], [r[2] for r in ranked]
 
 
 # ── 3. Prompt builder ─────────────────────────────────────────────────────────
