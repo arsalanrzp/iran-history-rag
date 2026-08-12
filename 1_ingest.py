@@ -6,7 +6,7 @@ from rank_bm25 import BM25Okapi
 import pickle
 
 
-# ── 1. Articles to fetch ──────────────────────────────────────────────────────
+# Wikipedia article titles to ingest
 ARTICLES = [
     "History of Iran",
     "Achaemenid Empire",
@@ -19,7 +19,6 @@ ARTICLES = [
 ]
 
 
-# ── 2. Fetch from Wikipedia ───────────────────────────────────────────────────
 def fetch_articles(titles):
     wiki = wikipediaapi.Wikipedia(
         language="en", user_agent="IranRAG/1.0 (learning project)"
@@ -35,19 +34,9 @@ def fetch_articles(titles):
     return corpus
 
 
-# ── 3. Chunking ───────────────────────────────────────────────────────────────
-# WHY chunking matters:
-# - Too large → retrieved chunk has too much noise, LLM gets confused
-# - Too small → chunk lacks enough context to be useful
-# - Overlap → ensures a sentence at a chunk boundary isn't lost
-
-
+# Split text into overlapping chunks for retrieval
 def chunk_text(text, chunk_size=400, overlap=80):
-    """
-    Split text into word-based chunks with overlap.
-    chunk_size=400 words ≈ ~500-550 tokens (safe for most embedding models)
-    overlap=80 words → repeated at start of next chunk for continuity
-    """
+    """Split text into word-based chunks with overlap."""
     words = text.split()
     chunks = []
     start = 0
@@ -59,9 +48,7 @@ def chunk_text(text, chunk_size=400, overlap=80):
     return chunks
 
 
-# ── 4. ChromaDB setup ─────────────────────────────────────────────────────────
-# PersistentClient saves everything to ./chroma_db/ on disk
-# Next time you run 2_query.py, it reads from there — no re-embedding needed
+# Create or open the ChromaDB collection used for retrieval
 
 
 def get_collection():
@@ -74,7 +61,7 @@ def get_collection():
     return collection
 
 
-# ── 5. Tokenization for BM25 ─────────────────────────────────────────────────
+# Build BM25 index for keyword search
 
 
 def tokenize(text):
@@ -87,7 +74,6 @@ def build_bm25_index(chunks):
     return bm25
 
 
-# ── 6. Embed + Store ──────────────────────────────────────────────────────────
 def ingest(corpus, collection, model):
     all_chunks, all_ids, all_metadata = [], [], []
 
@@ -139,7 +125,6 @@ def ingest(corpus, collection, model):
     print("✅ BM25 index saved.")
 
 
-# ── Main ──────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     print("Loading embedding model...")
     model = SentenceTransformer("all-MiniLM-L6-v2")

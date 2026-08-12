@@ -10,11 +10,10 @@ import pickle
 
 load_dotenv()
 
-# ── 1. Load the persisted DB (instant — no re-embedding) ───────────────────── and BM25 indexes
+# Load persisted DB and BM25 index
 client = chromadb.PersistentClient(path="./chroma_db")
 collection = client.get_collection("iran_history")
 model = SentenceTransformer("all-MiniLM-L6-v2")
-
 
 with open("./chroma_db/bm25_index.pkl", "rb") as f:
     bm25_data = pickle.load(f)
@@ -29,20 +28,17 @@ def tokenize(text):
     return text.lower().split()
 
 
-# Load once, alongside your bi-encoder model
 reranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
 
 
-# ── Gemini client ──────────────────────────────────────────────────────────
+# Gemini client
 gemini_client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
 GEMINI_MODEL = "gemini-3.5-flash"
 
 print(f"✅ Loaded collection with {collection.count()} chunks\n")
 
 
-# ── 2. Retrieval function ─────────────────────────────────────────────────────
 def retrieve(query, dense_top_k=20, bm25_top_k=20, rerank_top_n=4, k=60):
-    # ── Dense retrieval (unchanged) ──
     query_embedding = model.encode([query], normalize_embeddings=True).tolist()
     dense_results = collection.query(
         query_embeddings=query_embedding,
@@ -53,7 +49,6 @@ def retrieve(query, dense_top_k=20, bm25_top_k=20, rerank_top_n=4, k=60):
     dense_chunks = dense_results["documents"][0]
     dense_sources = [m["source"] for m in dense_results["metadatas"][0]]
 
-    # ── BM25 retrieval ──
     tokenized_query = tokenize(query)
     bm25_scores = bm25.get_scores(tokenized_query)
     top_bm25_idx = sorted(
@@ -61,7 +56,6 @@ def retrieve(query, dense_top_k=20, bm25_top_k=20, rerank_top_n=4, k=60):
     )[:bm25_top_k]
     bm25_result_ids = [bm25_ids[i] for i in top_bm25_idx]
 
-    # ── Lookup table: chunk id → (text, source), from either side ──
     lookup = {
         cid: (chunk, src)
         for cid, chunk, src in zip(dense_ids, dense_chunks, dense_sources)
@@ -70,7 +64,6 @@ def retrieve(query, dense_top_k=20, bm25_top_k=20, rerank_top_n=4, k=60):
         cid = bm25_ids[i]
         lookup.setdefault(cid, (bm25_chunks[i], bm25_sources[i]))
 
-    # ── Reciprocal Rank Fusion ──
     rrf_scores = {}
     for rank, cid in enumerate(dense_ids, start=1):
         rrf_scores[cid] = rrf_scores.get(cid, 0) + 1 / (k + rank)
@@ -85,7 +78,6 @@ def retrieve(query, dense_top_k=20, bm25_top_k=20, rerank_top_n=4, k=60):
     for i, cid in enumerate(merged_ids[:10]):
         print(f"  [{i + 1}] {cid} (rrf: {rrf_scores[cid]:.4f})")
 
-    # ── Cross-encoder reranking — unchanged, just fed a richer pool ──
     pairs = [[query, chunk] for chunk in merged_chunks]
     rerank_scores = reranker.predict(pairs)
     ranked = sorted(
@@ -97,7 +89,7 @@ def retrieve(query, dense_top_k=20, bm25_top_k=20, rerank_top_n=4, k=60):
     return [r[0] for r in ranked], [r[1] for r in ranked], [r[2] for r in ranked]
 
 
-# ── 3. Prompt builder ─────────────────────────────────────────────────────────
+# Prompt builder
 def build_prompt(query, chunks, sources):
     context_parts = []
     for chunk, source in zip(chunks, sources):
@@ -117,7 +109,7 @@ Answer:"""
     return prompt
 
 
-# ── 4. LLM call ────────────────────────────────────────────────────────────
+# LLM call
 def generate_answer(prompt):
     try:
         response = gemini_client.models.generate_content(
@@ -129,7 +121,7 @@ def generate_answer(prompt):
         return f"⚠️ Error calling Gemini API: {e}"
 
 
-# ── 5. Interactive loop ───────────────────────────────────────────────────────
+# Interactive loop
 def main():
     print("Iran History RAG — ask anything! (type 'quit' to exit)\n")
 
